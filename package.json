@@ -1,0 +1,12 @@
+{
+  "name": "banrakhshak",
+  "version": "1.0.0",
+  "description": "Fire detection server for BanRakhshak ESP8266 NodeMCU",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
