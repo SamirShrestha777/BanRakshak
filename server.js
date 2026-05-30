@@ -9,10 +9,21 @@ let db;
 let latest = {};
 
 async function connect() {
-  const client = new MongoClient(MONGO_URL);
-  await client.connect();
-  db = client.db(DB_NAME);
-  console.log('[DB] MongoDB connected');
+  try {
+    const client = new MongoClient(MONGO_URL, {
+      serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000,
+      tls: true,
+      tlsAllowInvalidCertificates: false,
+    });
+    await client.connect();
+    db = client.db(DB_NAME);
+    console.log('[DB] MongoDB connected');
+  } catch (e) {
+    console.error('[DB] Connection failed:', e.message);
+    console.log('[DB] Retrying in 10 seconds...');
+    setTimeout(connect, 10000);
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -24,7 +35,6 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(204); res.end(); return;
   }
 
-  // POST /data — receive reading from ESP8266
   if (req.method === 'POST' && req.url === '/data') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -32,21 +42,28 @@ const server = http.createServer(async (req, res) => {
       try {
         latest = JSON.parse(body);
         latest.timestamp = new Date();
-        if (db) await db.collection(COL_NAME).insertOne({ ...latest });
-        console.log('[POST] Saved:', latest);
+        if (db) {
+          await db.collection(COL_NAME).insertOne({ ...latest });
+          console.log('[POST] Saved to DB');
+        } else {
+          console.log('[POST] DB not ready — data received but not saved');
+        }
       } catch (e) {
         console.error('[POST] Error:', e.message);
       }
       res.writeHead(200); res.end('OK');
     });
 
-  // GET /data — return latest reading to dashboard
   } else if (req.method === 'GET' && req.url === '/data') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(latest));
 
-  // GET /history?limit=100 — return last N readings
   } else if (req.method === 'GET' && req.url.startsWith('/history')) {
+    if (!db) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'DB not connected yet' }));
+      return;
+    }
     const params = new URL(req.url, 'http://x').searchParams;
     const limit  = Math.min(parseInt(params.get('limit') || '100'), 1000);
     try {
@@ -61,8 +78,12 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500); res.end('DB error');
     }
 
-  // GET /stats — daily averages
   } else if (req.method === 'GET' && req.url === '/stats') {
+    if (!db) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'DB not connected yet' }));
+      return;
+    }
     try {
       const stats = await db.collection(COL_NAME).aggregate([
         {
@@ -72,14 +93,14 @@ const server = http.createServer(async (req, res) => {
               month: { $month: '$timestamp' },
               day:   { $dayOfMonth: '$timestamp' }
             },
-            avgTemp:  { $avg: '$temp' },
-            avgHum:   { $avg: '$hum' },
-            avgSmoke: { $avg: '$smoke' },
-            avgScore: { $avg: '$riskScore' },
-            maxSmoke: { $max: '$smoke' },
-            maxTemp:  { $max: '$temp' },
+            avgTemp:   { $avg: '$temp' },
+            avgHum:    { $avg: '$hum' },
+            avgSmoke:  { $avg: '$smoke' },
+            avgScore:  { $avg: '$riskScore' },
+            maxSmoke:  { $max: '$smoke' },
+            maxTemp:   { $max: '$temp' },
             highCount: { $sum: { $cond: [{ $eq: ['$riskLevel', 'HIGH'] }, 1, 0] } },
-            count:    { $sum: 1 }
+            count:     { $sum: 1 }
           }
         },
         { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } }
@@ -90,7 +111,6 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500); res.end('DB error');
     }
 
-  // GET /health
   } else if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', uptime: process.uptime(), db: !!db }));
@@ -101,9 +121,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-connect().then(() => {
-  server.listen(PORT, () => console.log(`[SERVER] Running on port ${PORT}`));
-}).catch(err => {
-  console.error('[DB] Connection failed:', err.message);
-  process.exit(1);
-});
+
+// Start server immediately, connect to DB in background
+server.listen(PORT, () => console.log(`[SERVER] Running on port ${PORT}`));
+connect();
